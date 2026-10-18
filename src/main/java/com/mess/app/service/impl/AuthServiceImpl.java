@@ -6,6 +6,7 @@ import com.mess.app.dto.response.OtpResponse;
 import com.mess.app.entity.Otp;
 import com.mess.app.entity.RefreshToken;
 import com.mess.app.entity.User;
+import com.mess.app.exception.EmailDeliveryException;
 import com.mess.app.exception.ResourceNotFoundException;
 import com.mess.app.repository.OtpRepository;
 import com.mess.app.repository.RefreshTokenRepository;
@@ -402,14 +403,18 @@ public class AuthServiceImpl implements AuthService {
                 .build();
 
         otpRepository.save(otp);
-        log.info("OTP saved successfully: {} for email: {}", otpCode, email);
+        log.info("OTP created for email: {}, purpose: {}", email, purpose); // never log the code itself
 
         try {
             emailService.sendOtpEmail(email, otpCode, purpose);
             log.info("OTP sent to: {} for purpose: {}", email, purpose);
         } catch (Exception e) {
-            log.error("Failed to send OTP email: {}", e.getMessage());
-            // Continue even if email fails
+            // The user never received a code, so drop it and tell the caller. Reporting "OTP sent"
+            // here would leave people waiting for an email that will not come.
+            log.error("Failed to send OTP email for purpose {}: {}", purpose, e.getMessage());
+            otpRepository.delete(otp);
+            throw new EmailDeliveryException(
+                    "We could not send the verification email right now. Please try again in a few minutes.", e);
         }
 
         return OtpResponse.builder()

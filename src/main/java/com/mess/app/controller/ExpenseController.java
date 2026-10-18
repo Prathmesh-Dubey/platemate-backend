@@ -43,6 +43,9 @@ public class ExpenseController {
                     "fileName", originalFilename
             );
             return ResponseEntity.ok(ApiResponse.success(response, "Receipt uploaded successfully"));
+        } catch (IllegalArgumentException e) {
+            // wrong file type / too large: the caller's mistake, not a server error
+            return ResponseEntity.badRequest().body(ApiResponse.error(e.getMessage()));
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(ApiResponse.error("Failed to upload receipt: " + e.getMessage()));

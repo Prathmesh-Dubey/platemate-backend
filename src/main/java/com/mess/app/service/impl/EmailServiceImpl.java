@@ -1,31 +1,36 @@
 package com.mess.app.service.impl;
 
+import com.mess.app.email.EmailAddresses;
+import com.mess.app.email.EmailTransport;
+import com.mess.app.exception.EmailDeliveryException;
 import com.mess.app.service.EmailService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.mail.SimpleMailMessage;
-import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.stereotype.Service;
 
+/**
+ * Builds the emails (OTP templates) and hands them to the configured {@link EmailTransport}
+ * (SMTP, Resend, Brevo or console - see EMAIL_PROVIDER). A failed delivery is always reported to the
+ * caller as an {@link EmailDeliveryException}; it is never silently ignored.
+ */
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class EmailServiceImpl implements EmailService {
 
-    private final JavaMailSender mailSender;
+    private final EmailTransport transport;
 
     @Override
     public void sendEmail(String to, String subject, String body) {
         try {
-            SimpleMailMessage message = new SimpleMailMessage();
-            message.setTo(to);
-            message.setSubject(subject);
-            message.setText(body);
-            mailSender.send(message);
-            log.info("Email sent successfully to: {}", to);
-        } catch (Exception e) {
-            log.error("Failed to send email to: {}", to, e);
-            throw new RuntimeException("Failed to send email: " + e.getMessage());
+            transport.send(to, subject, body);
+        } catch (EmailDeliveryException e) {
+            log.error("Failed to send email to {} via {}: {}", EmailAddresses.mask(to), transport.name(), e.getMessage());
+            throw e;
+        } catch (RuntimeException e) {
+            log.error("Failed to send email to {} via {}: {}", EmailAddresses.mask(to), transport.name(),
+                    e.getClass().getSimpleName());
+            throw new EmailDeliveryException("Failed to send email: " + e.getClass().getSimpleName(), e);
         }
     }
 

@@ -1,8 +1,9 @@
 package com.mess.app.util;
 
+import com.mess.app.storage.StorageObjectPaths;
+import com.mess.app.storage.StorageService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import okhttp3.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.multipart.MultipartFile;
@@ -10,13 +11,18 @@ import org.springframework.web.multipart.MultipartFile;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
+/**
+ * Entry point for every file upload and delete in the application.
+ *
+ * <p>This class validates (type, size) and names the file safely, then hands the bytes to the active
+ * {@link StorageService} (local folder in development, Supabase Storage in production). The public
+ * methods and the references they return are unchanged, so controllers, services and the frontend
+ * do not need to know where files are kept.</p>
+ */
 @Component
 @RequiredArgsConstructor
 @Slf4j
@@ -29,66 +35,62 @@ public class FileUploadUtil {
     /** Image file extensions accepted for profile pictures. */
     public static final Set<String> ALLOWED_IMAGE_EXTENSIONS = Set.of("jpg", "jpeg", "png", "webp", "gif");
 
-    @Value("${storage.type:local}")
-    private String storageType;
+    private static final Set<String> RECEIPT_EXTENSIONS = Set.of("jpg", "jpeg", "png", "webp", "gif", "pdf");
 
-    // Local storage config
-    @Value("${storage.local.upload-dir:uploads/stock-images}")
-    private String localUploadDir;
+    private static final Map<String, String> EXTENSION_BY_CONTENT_TYPE = Map.of(
+            "image/jpeg", "jpg",
+            "image/jpg", "jpg",
+            "image/png", "png",
+            "image/webp", "webp",
+            "image/gif", "gif",
+            "application/pdf", "pdf");
 
-    @Value("${storage.local.base-url:/uploads/stock-images/}")
-    private String localBaseUrl;
+    private static final Map<String, String> CONTENT_TYPE_BY_EXTENSION = Map.of(
+            "jpg", "image/jpeg",
+            "jpeg", "image/jpeg",
+            "png", "image/png",
+            "webp", "image/webp",
+            "gif", "image/gif",
+            "pdf", "application/pdf");
 
-    // Supabase storage config
-    @Value("${supabase.storage.url:}")
-    private String supabaseStorageUrl;
-
-    @Value("${supabase.storage.api-key:}")
-    private String supabaseApiKey;
-
-    @Value("${supabase.storage.bucket-name:stock-images}")
-    private String supabaseBucketName;
+    private final StorageService storageService;
 
     /** Maximum accepted size for a profile image upload, in megabytes. */
     @Value("${app.upload.profile-image.max-size-mb:5}")
     private long profileImageMaxSizeMb;
 
-    private final OkHttpClient okHttpClient = new OkHttpClient();
+    /** Maximum accepted size for stock images and expense receipts, in megabytes. */
+    @Value("${app.upload.max-size-mb:10}")
+    private long generalMaxSizeMb;
 
     /**
-     * Upload image - supports both local and Supabase storage
+     * Upload a stock item image.
+     *
+     * @throws IllegalArgumentException when the file is not an accepted image or is too large
      */
     public String uploadStockImage(MultipartFile file, String fileName) throws IOException {
-        String extension = getFileExtension(file.getOriginalFilename());
-        String newFileName = "stock/" + fileName + "_" + System.currentTimeMillis() + "." + extension;
-
-        if ("supabase".equalsIgnoreCase(storageType)) {
-            return uploadToSupabase(file, newFileName);
-        } else {
-            return uploadToLocal(file, newFileName);
-        }
+        String extension = validate(file, ALLOWED_IMAGE_EXTENSIONS, generalMaxSizeMb, "Image",
+                "Unsupported image type. Allowed formats: JPG, JPEG, PNG, WebP, GIF");
+        String safeName = StorageObjectPaths.sanitizeSegment(fileName, 80, "item");
+        return store(file, "stock/" + safeName + "_" + System.currentTimeMillis() + "." + extension, extension);
     }
 
     /**
-     * Upload expense receipt / invoice (supports images and PDFs)
+     * Upload an expense receipt / invoice (image or PDF).
+     *
+     * @throws IllegalArgumentException when the file is not an accepted image/PDF or is too large
      */
     public String uploadExpenseReceipt(MultipartFile file) throws IOException {
-        String originalName = file.getOriginalFilename() != null ? file.getOriginalFilename() : "document";
-        String extension = getFileExtension(originalName);
-        String safeBaseName = originalName.replaceAll("[^a-zA-Z0-9.-]", "_");
-        if (safeBaseName.contains(".")) {
-            safeBaseName = safeBaseName.substring(0, safeBaseName.lastIndexOf("."));
-        }
-        if (safeBaseName.length() > 30) {
-            safeBaseName = safeBaseName.substring(0, 30);
-        }
-        String newFileName = "receipts/" + safeBaseName + "_" + System.currentTimeMillis() + "." + extension;
+        String extension = validate(file, RECEIPT_EXTENSIONS, generalMaxSizeMb, "File",
+                "Unsupported file type. Allowed formats: JPG, JPEG, PNG, WebP, GIF, PDF");
 
-        if ("supabase".equalsIgnoreCase(storageType)) {
-            return uploadToSupabase(file, newFileName);
-        } else {
-            return uploadToLocal(file, newFileName);
-        }
+        String originalName = file.getOriginalFilename() != null ? file.getOriginalFilename() : "document";
+        String baseName = originalName.contains(".")
+                ? originalName.substring(0, originalName.lastIndexOf('.'))
+                : originalName;
+        String safeBaseName = StorageObjectPaths.sanitizeSegment(baseName, 30, "receipt");
+
+        return store(file, "receipts/" + safeBaseName + "_" + System.currentTimeMillis() + "." + extension, extension);
     }
 
     // ==================== PROFILE IMAGES ====================
@@ -99,66 +101,30 @@ public class FileUploadUtil {
      * @throws IllegalArgumentException with a user-friendly message (mapped to HTTP 400)
      */
     public void validateImageFile(MultipartFile file) {
-        if (file == null || file.isEmpty()) {
-            throw new IllegalArgumentException("Image file is required");
-        }
-
-        String contentType = file.getContentType() != null ? file.getContentType().toLowerCase(Locale.ROOT) : "";
-        String extension = getFileExtension(file.getOriginalFilename()).toLowerCase(Locale.ROOT);
-
-        boolean typeAllowed = ALLOWED_IMAGE_CONTENT_TYPES.contains(contentType);
-        boolean extensionAllowed = ALLOWED_IMAGE_EXTENSIONS.contains(extension);
-        if (!typeAllowed && !extensionAllowed) {
-            throw new IllegalArgumentException(
-                    "Unsupported image type. Allowed formats: JPG, JPEG, PNG, WebP, GIF");
-        }
-
-        long maxBytes = profileImageMaxSizeMb * 1024L * 1024L;
-        if (file.getSize() > maxBytes) {
-            throw new IllegalArgumentException(
-                    "Image is too large. Maximum size is " + profileImageMaxSizeMb + " MB");
-        }
+        validate(file, ALLOWED_IMAGE_EXTENSIONS, profileImageMaxSizeMb, "Image",
+                "Unsupported image type. Allowed formats: JPG, JPEG, PNG, WebP, GIF");
     }
 
     /**
-     * Stores a profile image for any owner type (user, candidate, staff) using the
-     * same storage mechanism as stock images (local folder or Supabase bucket).
+     * Stores a profile image for any owner type (user, candidate, staff) with the same storage as
+     * the other uploads.
      *
      * @param file      uploaded image
      * @param ownerType e.g. "user", "candidate", "staff"
      * @param ownerKey  a stable identifier of the owner (id / code)
-     * @return the stored image reference (relative /uploads/... path for local storage, absolute URL for Supabase)
+     * @return the stored image reference, e.g. {@code /uploads/stock-images/profiles/user_1_1700000000000.jpg}
      */
     public String uploadProfileImage(MultipartFile file, String ownerType, String ownerKey) throws IOException {
-        validateImageFile(file);
-
-        String extension = getFileExtension(file.getOriginalFilename()).toLowerCase(Locale.ROOT);
-        if (!ALLOWED_IMAGE_EXTENSIONS.contains(extension)) {
-            // Derive the extension from the content type when the file name is unhelpful
-            String contentType = file.getContentType() != null ? file.getContentType().toLowerCase(Locale.ROOT) : "";
-            extension = switch (contentType) {
-                case "image/png" -> "png";
-                case "image/webp" -> "webp";
-                case "image/gif" -> "gif";
-                default -> "jpg";
-            };
-        }
+        String extension = validate(file, ALLOWED_IMAGE_EXTENSIONS, profileImageMaxSizeMb, "Image",
+                "Unsupported image type. Allowed formats: JPG, JPEG, PNG, WebP, GIF");
         if ("jpeg".equals(extension)) {
             extension = "jpg";
         }
 
-        String safeType = ownerType == null ? "profile" : ownerType.replaceAll("[^a-zA-Z0-9_-]", "_");
-        String safeKey = ownerKey == null ? "unknown" : ownerKey.replaceAll("[^a-zA-Z0-9_-]", "_");
-        if (safeKey.length() > 40) {
-            safeKey = safeKey.substring(0, 40);
-        }
-        String newFileName = "profiles/" + safeType + "_" + safeKey + "_" + System.currentTimeMillis() + "." + extension;
-
-        if ("supabase".equalsIgnoreCase(storageType)) {
-            return uploadToSupabase(file, newFileName);
-        } else {
-            return uploadToLocal(file, newFileName);
-        }
+        String safeType = StorageObjectPaths.sanitizeSegment(ownerType, 20, "profile");
+        String safeKey = StorageObjectPaths.sanitizeSegment(ownerKey, 40, "unknown");
+        return store(file, "profiles/" + safeType + "_" + safeKey + "_" + System.currentTimeMillis() + "." + extension,
+                extension);
     }
 
     /**
@@ -191,13 +157,8 @@ public class FileUploadUtil {
         }
     }
 
-    /** True when the reference points to a file stored in the local upload folder of this backend. */
-    public boolean isLocallyStored(String imageUrl) {
-        return imageUrl != null && imageUrl.startsWith(localBaseUrl);
-    }
-
     /**
-     * Deletes a previously stored profile image if it lives in our own storage.
+     * Deletes a previously stored file if it lives in our own storage.
      * Never throws - a failed cleanup must not break the profile update.
      */
     public void deleteStoredImageQuietly(String imageUrl) {
@@ -205,177 +166,62 @@ public class FileUploadUtil {
             return;
         }
         try {
-            if (imageUrl.contains("supabase.co") && "supabase".equalsIgnoreCase(storageType)) {
-                deleteFromSupabase(imageUrl);
-            } else if (isLocallyStored(imageUrl)) {
-                deleteFromLocal(imageUrl);
-            }
+            storageService.delete(imageUrl);
         } catch (Exception e) {
-            log.warn("Could not delete old image {}: {}", imageUrl, e.getMessage());
+            log.warn("Could not delete old file {}: {}", imageUrl, e.getMessage());
         }
     }
 
-    /**
-     * Upload to local file system
-     */
-    private String uploadToLocal(MultipartFile file, String fileName) throws IOException {
-        Path uploadPath = Paths.get(localUploadDir);
-        Path filePath = uploadPath.resolve(fileName);
-
-        if (filePath.getParent() != null && !Files.exists(filePath.getParent())) {
-            Files.createDirectories(filePath.getParent());
-        }
-
-        Files.copy(file.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
-
-        log.info("File uploaded to local storage: {}", filePath.toString());
-        return localBaseUrl + fileName;
-    }
-
-    /**
-     * Upload to Supabase cloud storage
-     */
-    private String uploadToSupabase(MultipartFile file, String fileName) throws IOException {
-        if (supabaseStorageUrl.isEmpty() || supabaseApiKey.isEmpty()) {
-            log.warn("Supabase credentials not configured, falling back to local storage");
-            return uploadToLocal(file, fileName);
-        }
-
-        RequestBody requestBody = new MultipartBody.Builder()
-                .setType(MultipartBody.FORM)
-                .addFormDataPart("file", fileName,
-                        RequestBody.create(file.getBytes(), MediaType.parse(file.getContentType())))
-                .build();
-
-        Request request = new Request.Builder()
-                .url(supabaseStorageUrl + "/object/" + supabaseBucketName + "/" + fileName)
-                .addHeader("Authorization", "Bearer " + supabaseApiKey)
-                .post(requestBody)
-                .build();
-
-        try (Response response = okHttpClient.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                log.error("Supabase upload failed: {}, falling back to local storage", response.message());
-                return uploadToLocal(file, fileName);
-            }
-            String imageUrl = supabaseStorageUrl + "/object/public/" + supabaseBucketName + "/" + fileName;
-            log.info("File uploaded to Supabase: {}", imageUrl);
-            return imageUrl;
-        }
-    }
-
-    /**
-     * Delete image - supports both local and Supabase
-     */
+    /** Delete a stored image. References that are not stored by us (external URLs) are ignored. */
     public void deleteStockImage(String imageUrl) throws IOException {
         if (imageUrl == null || imageUrl.isEmpty()) {
             return;
         }
+        storageService.delete(imageUrl);
+    }
 
-        if ("supabase".equalsIgnoreCase(storageType) && imageUrl.contains("supabase.co")) {
-            deleteFromSupabase(imageUrl);
-        } else {
-            deleteFromLocal(imageUrl);
-        }
+    // ==================== INTERNALS ====================
+
+    private String store(MultipartFile file, String objectPath, String extension) throws IOException {
+        String contentType = CONTENT_TYPE_BY_EXTENSION.getOrDefault(extension, "application/octet-stream");
+        return storageService.upload(objectPath, file.getBytes(), contentType);
     }
 
     /**
-     * Delete from local file system. Resolves the path relative to the configured
-     * base URL so files stored in sub folders (stock/, receipts/, profiles/) are found.
+     * Checks size and type and returns the extension to store under. The stored extension always comes
+     * from the allow-list (taken from the content type when the file name has none), so names like
+     * {@code evil.exe} or {@code x.php} can never end up in storage.
      */
-    private void deleteFromLocal(String imageUrl) throws IOException {
-        Path filePath = resolveLocalPath(imageUrl);
-        if (filePath == null) {
-            return;
+    private String validate(MultipartFile file, Set<String> allowedExtensions, long maxSizeMb, String noun,
+                            String typeMessage) {
+        if (file == null || file.isEmpty()) {
+            throw new IllegalArgumentException("Image".equals(noun) ? "Image file is required" : "File is required");
         }
 
-        if (Files.exists(filePath)) {
-            Files.delete(filePath);
-            log.info("File deleted from local storage: {}", filePath.toString());
+        long maxBytes = maxSizeMb * 1024L * 1024L;
+        if (file.getSize() > maxBytes) {
+            throw new IllegalArgumentException(noun + " is too large. Maximum size is " + maxSizeMb + " MB");
         }
+
+        String contentType = file.getContentType() != null ? file.getContentType().toLowerCase(Locale.ROOT).trim() : "";
+        String extension = extensionOf(file.getOriginalFilename());
+
+        if (allowedExtensions.contains(extension)) {
+            return extension;
+        }
+        String fromType = EXTENSION_BY_CONTENT_TYPE.get(contentType);
+        if (fromType != null && allowedExtensions.contains(fromType)) {
+            return fromType;
+        }
+        throw new IllegalArgumentException(typeMessage);
     }
 
-    /**
-     * Maps a stored reference back to the file on disk, refusing anything that
-     * would escape the upload directory.
-     */
-    private Path resolveLocalPath(String imageUrl) {
-        if (imageUrl == null || imageUrl.isEmpty() || imageUrl.startsWith("http")) {
-            return null;
-        }
-        String relative = imageUrl.startsWith(localBaseUrl)
-                ? imageUrl.substring(localBaseUrl.length())
-                : imageUrl.substring(imageUrl.lastIndexOf("/") + 1);
-        Path uploadRoot = Paths.get(localUploadDir).toAbsolutePath().normalize();
-        Path candidate = uploadRoot.resolve(relative).normalize();
-        if (!candidate.startsWith(uploadRoot)) {
-            log.warn("Refusing to resolve path outside upload directory: {}", imageUrl);
-            return null;
-        }
-        return candidate;
-    }
-
-    /**
-     * Delete from Supabase cloud storage
-     */
-    private void deleteFromSupabase(String imageUrl) throws IOException {
-        // Extract file path from URL
-        String filePath = imageUrl.replace(supabaseStorageUrl + "/object/public/" + supabaseBucketName + "/", "");
-
-        Request request = new Request.Builder()
-                .url(supabaseStorageUrl + "/object/" + supabaseBucketName + "/" + filePath)
-                .addHeader("Authorization", "Bearer " + supabaseApiKey)
-                .delete()
-                .build();
-
-        try (Response response = okHttpClient.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                log.warn("Failed to delete from Supabase: {}", response.message());
-            } else {
-                log.info("File deleted from Supabase: {}", filePath);
-            }
-        }
-    }
-
-    /**
-     * Get file extension
-     */
-    private String getFileExtension(String fileName) {
+    /** Lower-case extension of a file name, restricted to letters and digits ("" when there is none). */
+    private static String extensionOf(String fileName) {
         if (fileName == null || !fileName.contains(".")) {
-            return "jpg";
+            return "";
         }
-        return fileName.substring(fileName.lastIndexOf(".") + 1);
-    }
-
-    /**
-     * Get absolute file path for local storage
-     */
-    public String getAbsolutePath(String imageUrl) {
-        if (imageUrl == null || imageUrl.isEmpty()) {
-            return null;
-        }
-
-        if (imageUrl.contains("supabase.co")) {
-            return imageUrl; // Cloud URL
-        }
-
-        Path path = resolveLocalPath(imageUrl);
-        return path != null ? path.toString() : null;
-    }
-
-    /**
-     * Check if file exists
-     */
-    public boolean fileExists(String imageUrl) {
-        if (imageUrl == null || imageUrl.isEmpty()) {
-            return false;
-        }
-
-        if (imageUrl.contains("supabase.co")) {
-            return true; // Assume cloud file exists
-        }
-
-        Path path = resolveLocalPath(imageUrl);
-        return path != null && Files.exists(path);
+        String extension = fileName.substring(fileName.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
+        return extension.matches("[a-z0-9]{1,5}") ? extension : "";
     }
 }

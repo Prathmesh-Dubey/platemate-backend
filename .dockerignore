@@ -1,0 +1,13 @@
+# Keep secrets and local files out of the Docker build context (and therefore out of the image)
+.env
+.env.*
+!.env.example
+.git
+.github
+target
+logs
+uploads
+*.log
+README.md
+RENDER_DEPLOYMENT.md
+postman.json
