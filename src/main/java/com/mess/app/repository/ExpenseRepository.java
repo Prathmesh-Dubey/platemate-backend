@@ -119,4 +119,23 @@ public interface ExpenseRepository extends JpaRepository<Expense, String> {
         List<Object[]> sumExpensesByYearMonth(
                         @Param("startDate") LocalDate startDate,
                         @Param("endDate") LocalDate endDate);
+
+        /** Same as {@link #sumExpensesByYearMonth} but limited to the given categories. */
+        @Query("SELECT EXTRACT(YEAR FROM e.expenseDate), EXTRACT(MONTH FROM e.expenseDate), SUM(e.totalAmount), COUNT(e) " +
+                        "FROM Expense e WHERE e.expenseDate BETWEEN :startDate AND :endDate " +
+                        "AND e.category IN :categories " +
+                        "GROUP BY EXTRACT(YEAR FROM e.expenseDate), EXTRACT(MONTH FROM e.expenseDate)")
+        List<Object[]> sumExpensesByYearMonthAndCategoryIn(
+                        @Param("startDate") LocalDate startDate,
+                        @Param("endDate") LocalDate endDate,
+                        @Param("categories") java.util.Collection<String> categories);
+
+        @Query("SELECT SUM(e.totalAmount) FROM Expense e WHERE e.expenseDate BETWEEN :startDate AND :endDate " +
+                        "AND e.category IN :categories")
+        BigDecimal getTotalExpensesByDateRangeAndCategoryIn(
+                        @Param("startDate") LocalDate startDate,
+                        @Param("endDate") LocalDate endDate,
+                        @Param("categories") java.util.Collection<String> categories);
+
+        long countByExpenseDateAndCategoryIn(LocalDate date, java.util.Collection<String> categories);
 }

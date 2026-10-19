@@ -16,7 +16,7 @@ import java.util.List;
  *
  * Formula (per month):
  *   revenue  = messFees + partyIncome + collegeBillingIncome
- *   expenses = dayToDayExpenses + staffSalary
+ *   expenses = dayToDayExpenses + supplyExpenses + staffSalary
  *   profit   = revenue - expenses
  */
 @Data
@@ -47,6 +47,7 @@ public class MonthlyProfitLossResponse {
 
         // expense side
         private BigDecimal dayToDayExpenses;
+        private BigDecimal supplyExpenses; // Total Expenses page categories (grocery, gas, utilities, maintenance)
         private BigDecimal staffSalary;
         private BigDecimal expenses;    // total expenses
 
@@ -65,6 +66,7 @@ public class MonthlyProfitLossResponse {
         private BigDecimal collegeBillingIncome;
         private BigDecimal income;
         private BigDecimal dayToDayExpenses;
+        private BigDecimal supplyExpenses;
         private BigDecimal staffSalary;
         private BigDecimal expenses;
         private BigDecimal profit;

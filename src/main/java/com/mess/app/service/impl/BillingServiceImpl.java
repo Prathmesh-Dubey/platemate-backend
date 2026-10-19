@@ -42,6 +42,12 @@ public class BillingServiceImpl implements BillingService {
     private static final int ALL_TIME_TO_YEAR = 2100;
 
     /**
+     * Categories logged on the Day-to-day Expenses page. Every other expense category belongs to the
+     * Total Expenses page ("supplies") and is reported separately, but still counts toward total costs.
+     */
+    private static final List<String> DAY_TO_DAY_CATEGORIES = List.of("VEGETABLES", "MILK_DAIRY", "MISCELLANEOUS");
+
+    /**
      * Documentation of the financial model used by the Billing dashboard and the
      * monthly Profit &amp; Loss chart. This is returned to the client as "basis".
      */
@@ -49,7 +55,7 @@ public class BillingServiceImpl implements BillingService {
             "Revenue = mess fees collected (fee_collections, isPaid, attributed to the fee month) "
             + "+ party bills (parties.totalBill by event date) "
             + "+ college billable amount (college_billing by billing month). "
-            + "Expenses = expenses table (all categories, by expense date) "
+            + "Expenses = expenses table (day-to-day categories + supply categories, by expense date) "
             + "+ staff salary paid (staff_payments.amount by salary month). "
             + "Stock purchase transactions and staff advances are intentionally excluded to avoid double counting.";
 
@@ -285,7 +291,7 @@ public class BillingServiceImpl implements BillingService {
         BigDecimal otherIncome = agg.collegeBilled;        // college billing receivable
         BigDecimal totalIncome = messFeesIncome.add(partyIncome).add(otherIncome);
 
-        BigDecimal stockExpenses = agg.expenses;           // expenses table (all categories)
+        BigDecimal stockExpenses = agg.expenses.add(agg.supplyExpenses); // expenses table (all categories)
         BigDecimal staffSalaryExpenses = agg.staffSalaryPaid;
         BigDecimal otherExpenses = BigDecimal.ZERO;
         BigDecimal totalExpenses = stockExpenses.add(staffSalaryExpenses).add(otherExpenses);
@@ -499,6 +505,7 @@ public class BillingServiceImpl implements BillingService {
         Map<String, BigDecimal> categoryBreakdown = new LinkedHashMap<>();
         for (Object[] row : expenseRepository.getCategoryWiseExpenses(periodStart, periodEnd)) {
             String category = row[0] != null ? row[0].toString() : "UNCATEGORIZED";
+            if (!DAY_TO_DAY_CATEGORIES.contains(category.toUpperCase())) continue; // day-to-day box only
             categoryBreakdown.merge(category, money(row[1]), BigDecimal::add);
         }
 
@@ -507,8 +514,9 @@ public class BillingServiceImpl implements BillingService {
         long activeStaff = staffRepository.countByStatus(Staff.StaffStatus.ACTIVE);
 
         // Today's day-to-day expense (always the current server date, independent of the scope)
-        BigDecimal todayAmount = money(expenseRepository.getTotalExpensesByDateRange(today, today));
-        long todayCount = expenseRepository.countByExpenseDate(today);
+        BigDecimal todayAmount = money(expenseRepository.getTotalExpensesByDateRangeAndCategoryIn(
+                today, today, DAY_TO_DAY_CATEGORIES));
+        long todayCount = expenseRepository.countByExpenseDateAndCategoryIn(today, DAY_TO_DAY_CATEGORIES);
 
         // Mess fees expected / pending only make sense for a single month
         BigDecimal expectedMonthly = null;
@@ -528,7 +536,7 @@ public class BillingServiceImpl implements BillingService {
 
         // Profit & loss for the period (same formula as the monthly chart)
         BigDecimal totalRevenue = period.messFees.add(period.partyBilled).add(period.collegeBilled);
-        BigDecimal totalExpenses = period.expenses.add(period.staffSalaryPaid);
+        BigDecimal totalExpenses = period.expenses.add(period.supplyExpenses).add(period.staffSalaryPaid);
         BigDecimal combinedExpenses = totalExpenses;
 
         return BillingSummaryResponse.builder()
@@ -563,7 +571,7 @@ public class BillingServiceImpl implements BillingService {
                         .build())
                 .combinedExpenses(BillingSummaryResponse.CombinedExpenseBox.builder()
                         .total(scale(combinedExpenses))
-                        .expenses(scale(period.expenses))
+                        .expenses(scale(period.expenses.add(period.supplyExpenses)))
                         .staffSalaryPaid(scale(period.staffSalaryPaid))
                         .formula("Expenses (all categories, counted once) + Staff salary paid")
                         .build())
@@ -625,7 +633,7 @@ public class BillingServiceImpl implements BillingService {
             yearTotal.add(agg);
 
             BigDecimal income = agg.messFees.add(agg.partyBilled).add(agg.collegeBilled);
-            BigDecimal expenses = agg.expenses.add(agg.staffSalaryPaid);
+            BigDecimal expenses = agg.expenses.add(agg.supplyExpenses).add(agg.staffSalaryPaid);
             BigDecimal profit = income.subtract(expenses);
             boolean hasData = agg.hasData();
             if (hasData) {
@@ -643,6 +651,7 @@ public class BillingServiceImpl implements BillingService {
                     .collegeBillingIncome(scale(agg.collegeBilled))
                     .income(scale(income))
                     .dayToDayExpenses(scale(agg.expenses))
+                    .supplyExpenses(scale(agg.supplyExpenses))
                     .staffSalary(scale(agg.staffSalaryPaid))
                     .expenses(scale(expenses))
                     .profit(scale(profit))
@@ -652,7 +661,7 @@ public class BillingServiceImpl implements BillingService {
         }
 
         BigDecimal totalIncome = yearTotal.messFees.add(yearTotal.partyBilled).add(yearTotal.collegeBilled);
-        BigDecimal totalExpenses = yearTotal.expenses.add(yearTotal.staffSalaryPaid);
+        BigDecimal totalExpenses = yearTotal.expenses.add(yearTotal.supplyExpenses).add(yearTotal.staffSalaryPaid);
 
         return MonthlyProfitLossResponse.builder()
                 .year(year)
@@ -664,6 +673,7 @@ public class BillingServiceImpl implements BillingService {
                         .collegeBillingIncome(scale(yearTotal.collegeBilled))
                         .income(scale(totalIncome))
                         .dayToDayExpenses(scale(yearTotal.expenses))
+                        .supplyExpenses(scale(yearTotal.supplyExpenses))
                         .staffSalary(scale(yearTotal.staffSalaryPaid))
                         .expenses(scale(totalExpenses))
                         .profit(scale(totalIncome.subtract(totalExpenses)))
@@ -806,6 +816,8 @@ public class BillingServiceImpl implements BillingService {
         long collegeCount = 0;
         BigDecimal expenses = BigDecimal.ZERO;
         long expenseCount = 0;
+        BigDecimal supplyExpenses = BigDecimal.ZERO; // expense categories outside the day-to-day set
+        long supplyCount = 0;
         BigDecimal staffSalaryPaid = BigDecimal.ZERO;
         long staffPaymentCount = 0;
 
@@ -821,12 +833,14 @@ public class BillingServiceImpl implements BillingService {
             collegeCount += other.collegeCount;
             expenses = expenses.add(other.expenses);
             expenseCount += other.expenseCount;
+            supplyExpenses = supplyExpenses.add(other.supplyExpenses);
+            supplyCount += other.supplyCount;
             staffSalaryPaid = staffSalaryPaid.add(other.staffSalaryPaid);
             staffPaymentCount += other.staffPaymentCount;
         }
 
         boolean hasData() {
-            return messFeeCount > 0 || partyCount > 0 || collegeCount > 0 || expenseCount > 0 || staffPaymentCount > 0;
+            return messFeeCount > 0 || partyCount > 0 || collegeCount > 0 || expenseCount > 0 || supplyCount > 0 || staffPaymentCount > 0;
         }
     }
 
@@ -853,11 +867,20 @@ public class BillingServiceImpl implements BillingService {
             agg.staffPaymentCount += count(row[3]);
         }
 
+        // Day-to-day categories -> expenses; every other category -> supplyExpenses (all minus day-to-day)
         for (Object[] row : expenseRepository.sumExpensesByYearMonth(start, end)) {
+            MonthAggregate agg = aggregateFor(map, row[0], row[1]);
+            if (agg == null) continue;
+            agg.supplyExpenses = agg.supplyExpenses.add(money(row[2]));
+            agg.supplyCount += count(row[3]);
+        }
+        for (Object[] row : expenseRepository.sumExpensesByYearMonthAndCategoryIn(start, end, DAY_TO_DAY_CATEGORIES)) {
             MonthAggregate agg = aggregateFor(map, row[0], row[1]);
             if (agg == null) continue;
             agg.expenses = agg.expenses.add(money(row[2]));
             agg.expenseCount += count(row[3]);
+            agg.supplyExpenses = agg.supplyExpenses.subtract(money(row[2]));
+            agg.supplyCount -= count(row[3]);
         }
 
         for (Object[] row : partyRepository.sumBillingByYearMonth(start, end)) {
