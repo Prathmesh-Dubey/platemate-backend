@@ -75,11 +75,14 @@ public interface FeeCollectionRepository extends JpaRepository<FeeCollection, St
         // ==================== FINANCIAL AGGREGATION (Billing dashboard & monthly P&L) ====================
 
         /**
-         * Mess fees actually collected (isPaid = true) grouped by the month the fee is FOR
-         * (paymentYear / paymentMonthNumber). Row: [year, month, sum(amount), count].
+         * Mess fees collected, grouped by the month the fee is FOR (paymentYear / paymentMonthNumber).
+         * Every fee_collections row is a recorded payment (a fee is only ever saved when it is collected),
+         * so rows are counted regardless of the isPaid flag - older rows can carry isPaid = false/NULL
+         * (column added later) while the Candidates page already counts them as collected.
+         * Row: [year, month, sum(amount), count].
          */
         @Query("SELECT f.paymentYear, f.paymentMonthNumber, SUM(f.amount), COUNT(f) FROM FeeCollection f " +
-                        "WHERE f.isPaid = true AND f.paymentYear BETWEEN :fromYear AND :toYear " +
+                        "WHERE f.paymentYear BETWEEN :fromYear AND :toYear " +
                         "GROUP BY f.paymentYear, f.paymentMonthNumber")
         List<Object[]> sumCollectedFeesByYearMonth(@Param("fromYear") int fromYear, @Param("toYear") int toYear);
 

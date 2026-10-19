@@ -505,9 +505,15 @@ public class BillingServiceImpl implements BillingService {
         Map<String, BigDecimal> categoryBreakdown = new LinkedHashMap<>();
         for (Object[] row : expenseRepository.getCategoryWiseExpenses(periodStart, periodEnd)) {
             String category = row[0] != null ? row[0].toString() : "UNCATEGORIZED";
-            if (!DAY_TO_DAY_CATEGORIES.contains(category.toUpperCase())) continue; // day-to-day box only
+            // "Total Expenses" box = Total Expenses page categories only (day-to-day ones are reported separately)
+            if (DAY_TO_DAY_CATEGORIES.contains(category.toUpperCase())) continue;
             categoryBreakdown.merge(category, money(row[1]), BigDecimal::add);
         }
+
+        // Total Expenses page: paid vs unpaid split for the period
+        BigDecimal supplyPaid = money(expenseRepository.getPaidTotalExcludingCategories(
+                periodStart, periodEnd, DAY_TO_DAY_CATEGORIES));
+        BigDecimal supplyUnpaid = period.supplyExpenses.subtract(supplyPaid).max(BigDecimal.ZERO);
 
         // Staff payroll commitment (current roster)
         BigDecimal monthlyPayroll = money(staffRepository.getTotalActiveBaseSalary());
@@ -560,8 +566,12 @@ public class BillingServiceImpl implements BillingService {
                         .paymentCount(period.staffPaymentCount)
                         .build())
                 .expenses(BillingSummaryResponse.ExpenseBox.builder()
-                        .total(scale(period.expenses))
-                        .count(period.expenseCount)
+                        .total(scale(period.supplyExpenses))
+                        .count(period.supplyCount)
+                        .dayToDayTotal(scale(period.expenses))
+                        .dayToDayCount(period.expenseCount)
+                        .paidTotal(scale(supplyPaid))
+                        .unpaidTotal(scale(supplyUnpaid))
                         .categoryBreakdown(categoryBreakdown)
                         .build())
                 .todayExpense(BillingSummaryResponse.TodayExpenseBox.builder()
@@ -604,7 +614,7 @@ public class BillingServiceImpl implements BillingService {
                         .messFeesRevenue(scale(period.messFees))
                         .partyIncome(scale(period.partyBilled))
                         .collegeBillingIncome(scale(period.collegeBilled))
-                        .expenses(scale(period.expenses))
+                        .expenses(scale(period.expenses.add(period.supplyExpenses)))
                         .staffSalary(scale(period.staffSalaryPaid))
                         .build())
                 .build();

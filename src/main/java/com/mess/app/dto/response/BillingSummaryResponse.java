@@ -68,7 +68,11 @@ public class BillingSummaryResponse {
         private long paymentCount;
     }
 
-    /** Box 3 - expenses table (all categories, both "Day-to-day" and "Total Expenses" pages write here). */
+    /**
+     * Box 3 - expenses table. total/count/categoryBreakdown hold the "Total Expenses" page data
+     * (grocery, gas, utilities, maintenance); dayToDayTotal/dayToDayCount hold the "Day-to-day Expenses"
+     * page data (vegetables, milk &amp; dairy, miscellaneous) for the same period.
+     */
     @Data
     @Builder
     @NoArgsConstructor
@@ -77,6 +81,10 @@ public class BillingSummaryResponse {
         private BigDecimal total;
         private long count;
         private Map<String, BigDecimal> categoryBreakdown;
+        private BigDecimal dayToDayTotal;
+        private long dayToDayCount;
+        private BigDecimal paidTotal;   // paid part of total
+        private BigDecimal unpaidTotal; // unpaid / pending part of total
     }
 
     /** Box 4 - expenses dated today (server date). */

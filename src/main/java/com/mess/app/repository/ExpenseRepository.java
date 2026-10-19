@@ -137,5 +137,13 @@ public interface ExpenseRepository extends JpaRepository<Expense, String> {
                         @Param("endDate") LocalDate endDate,
                         @Param("categories") java.util.Collection<String> categories);
 
+        /** Paid total of the categories NOT in the given set (Total Expenses page paid amount). */
+        @Query("SELECT SUM(e.totalAmount) FROM Expense e WHERE e.expenseDate BETWEEN :startDate AND :endDate " +
+                        "AND e.category NOT IN :categories AND UPPER(e.paymentStatus) = 'PAID'")
+        BigDecimal getPaidTotalExcludingCategories(
+                        @Param("startDate") LocalDate startDate,
+                        @Param("endDate") LocalDate endDate,
+                        @Param("categories") java.util.Collection<String> categories);
+
         long countByExpenseDateAndCategoryIn(LocalDate date, java.util.Collection<String> categories);
 }
